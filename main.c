@@ -1,3 +1,5 @@
+#include <ctype.h>
+#include <dirent.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <stdbool.h>
@@ -8,8 +10,10 @@
 #include <unistd.h>
 #include <locale.h>
 #include <assert.h>
+#include <time.h>
 
 #include <sys/signalfd.h>
+#include <sys/stat.h>
 
 #include <wayland-client.h>
 #include <wayland-cursor.h>
@@ -36,6 +40,11 @@ static struct wl_registry *registry;
 static struct wl_compositor *compositor;
 static struct wl_shm *shm;
 static struct zwlr_layer_shell_v1 *layer_shell;
+int info = 0;
+int exit_code = EXIT_SUCCESS;
+int sig_fd = -1;
+FILE *fp;
+char *files_img[1024];
 
 static bool have_xrgb8888 = false;
 
@@ -101,9 +110,10 @@ render(struct output *output)
 
     pixman_image_unref(pix);
 
-    LOG_INFO("render: %dx%d (scaled from %dx%d)",
-             width * scale, height * scale,
-             img_width, img_height);
+    if (info) 
+        LOG_INFO("render: %dx%d (scaled from %dx%d)",
+                 width * scale, height * scale,
+                 img_width, img_height);
 
     wl_surface_set_buffer_scale(output->surf, scale);
     wl_surface_attach(output->surf, buf->wl_buf, 0, 0);
@@ -181,8 +191,9 @@ output_done(void *data, struct wl_output *wl_output)
     const int height = output->height;
     const int scale = output->scale;
 
-    LOG_INFO("output: %s %s (%dx%d, scale=%d)",
-             output->make, output->model, width, height, scale);
+    if (info)
+        LOG_INFO("output: %s %s (%dx%d, scale=%d)",
+                 output->make, output->model, width, height, scale);
 }
 
 static void
@@ -326,53 +337,19 @@ static const struct wl_registry_listener registry_listener = {
     .global_remove = &handle_global_remove,
 };
 
-int
-main(int argc, const char *const *argv)
-{
-    if (argc < 2) {
-        fprintf(stderr, "error: missing required argument: image path\n");
-        return EXIT_FAILURE;
-    }
-
-    setlocale(LC_CTYPE, "");
-    log_init(LOG_COLORIZE_AUTO, false, LOG_FACILITY_DAEMON, LOG_CLASS_WARNING);
-
-    const char *image_path = argv[1];
-    image = NULL;
-
-    FILE *fp = fopen(image_path, "rb");
-    if (fp == NULL) {
-        LOG_ERRNO("%s: failed to open", image_path);
-        return EXIT_FAILURE;
-    }
-
-#if defined(WBG_HAVE_JPG)
-    if (image == NULL)
-        image = jpg_load(fp, image_path);
-#endif
-#if defined(WBG_HAVE_PNG)
-    if (image == NULL)
-        image = png_load(fp, image_path);
-#endif
-    if (image == NULL) {
-        fprintf(stderr, "error: %s: failed to load\n", image_path);
-        fclose(fp);
-        return EXIT_FAILURE;
-    }
-
-    int exit_code = EXIT_FAILURE;
-    int sig_fd = -1;
+static int 
+display_init() {
 
     display = wl_display_connect(NULL);
     if (display == NULL) {
         LOG_ERR("failed to connect to wayland; no compositor running?");
-        goto out;
+        return 1;
     }
 
     registry = wl_display_get_registry(display);
     if (registry == NULL)  {
         LOG_ERR("failed to get wayland registry");
-        goto out;
+        return 1;
     }
 
     wl_registry_add_listener(registry, &registry_listener, NULL);
@@ -380,15 +357,15 @@ main(int argc, const char *const *argv)
 
     if (compositor == NULL) {
         LOG_ERR("no compositor");
-        goto out;
+        return 1;
     }
     if (shm == NULL) {
         LOG_ERR("no shared memory buffers interface");
-        goto out;
+        return 1;
     }
     if (layer_shell == NULL) {
         LOG_ERR("no layer shell interface");
-        goto out;
+        return 1;
     }
 
     tll_foreach(outputs, it)
@@ -398,70 +375,14 @@ main(int argc, const char *const *argv)
 
     if (!have_xrgb8888) {
         LOG_ERR("shm: XRGB image format not available");
-        goto out;
+        exit_code = EXIT_FAILURE;
+        return 1;
     }
+    return 0;
+}
 
-    sigset_t mask;
-    sigemptyset(&mask);
-    sigaddset(&mask, SIGINT);
-    sigaddset(&mask, SIGQUIT);
-
-    sigprocmask(SIG_BLOCK, &mask, NULL);
-
-    if ((sig_fd = signalfd(-1, &mask, 0)) < 0) {
-        LOG_ERRNO("failed to create signal FD");
-        goto out;
-    }
-
-    while (true) {
-        wl_display_flush(display);
-
-        struct pollfd fds[] = {
-            {.fd = wl_display_get_fd(display), .events = POLLIN},
-            {.fd = sig_fd, .events = POLLIN},
-        };
-        int ret = poll(fds, sizeof(fds) / sizeof(fds[0]), -1);
-
-        if (ret < 0) {
-            if (errno == EINTR)
-                continue;
-
-            LOG_ERRNO("failed to poll");
-            break;
-        }
-
-        if (fds[0].revents & POLLHUP) {
-            LOG_WARN("disconnected by compositor");
-            break;
-        }
-
-        if (fds[0].revents & POLLIN)
-            wl_display_dispatch(display);
-
-        if (fds[1].revents & POLLHUP)
-            abort();
-
-        if (fds[1].revents & POLLIN) {
-            struct signalfd_siginfo info;
-            ssize_t count = read(sig_fd, &info, sizeof(info));
-            if (count < 0) {
-                if (errno == EINTR)
-                    continue;
-
-                LOG_ERRNO("failed to read from signal FD");
-                break;
-            }
-
-            assert(count == sizeof(info));
-            assert(info.ssi_signo == SIGINT || info.ssi_signo == SIGQUIT);
-
-            LOG_INFO("goodbye");
-            exit_code = EXIT_SUCCESS;
-            break;
-        }
-    }
-
-out:
+static void 
+display_close() {
 
     if (sig_fd >= 0)
         close(sig_fd);
@@ -484,7 +405,250 @@ out:
         free(pixman_image_get_data(image));
         pixman_image_unref(image);
     }
+}
+
+static void
+exit_close() {
+
     log_deinit();
     fclose(fp);
-    return exit_code;
+
+    exit(exit_code);
+}
+
+int 
+a_strcmp( const void* a, const void* b )
+{
+    return strcmp( *(const char**)a, *(const char**)b );
+}
+
+int
+main(int argc, char *argv[])
+{
+    setlocale(LC_CTYPE, "");
+    log_init(LOG_COLORIZE_AUTO, false, LOG_FACILITY_DAEMON, LOG_CLASS_WARNING);
+
+    char *image_path = NULL;
+    char *dir_path;
+    int image_cnt = 0;
+
+    int c;
+    int dir = 0;
+    int timer = 0;
+    int random = 0;
+
+    opterr = 0;
+    while ((c = getopt (argc, argv, "irt:")) != -1)
+        switch (c)
+        {
+          case 'i':
+            info = 1;
+            break;
+          case 'r':
+            random = 1;
+            break;
+          case 't':
+            timer = atoi(optarg);
+            break;
+          default:
+            fprintf(stderr, "Usage:\n%s [-t sec] [-r] <file/dir name>\n", argv[0]);
+            fprintf(stderr, "        -t timer seconds\n");
+            fprintf(stderr, "        -r random yes (default no)\n");
+            fprintf(stderr, "        -i info -- debugging\n");
+            exit(0);
+        }
+
+    if (optind >= argc) {
+        fprintf(stderr, "Usage:\n%s [-t sec] [-r] <file/dir name>\n", argv[0]);
+        fprintf(stderr, "        -t timer seconds\n");
+        fprintf(stderr, "        -r random yes (default no)\n");
+        fprintf(stderr, "        -i info -- debugging\n");
+        fprintf(stderr, "*** image path is required ***\n");
+        exit(EXIT_FAILURE);
+    }
+
+    /* is it a file or dir */
+    struct stat path_stat;
+    stat(argv[optind], &path_stat);
+    if (S_ISDIR(path_stat.st_mode)) {
+        dir = 1;    
+        dir_path = argv[optind];
+    } else {
+        random = 0;
+        timer = 0;
+        image_path = argv[optind];
+    }
+
+    sigset_t mask;
+    sigemptyset(&mask);
+    sigaddset(&mask, SIGINT);
+    sigaddset(&mask, SIGQUIT);
+    if (timer > 0) 
+        sigaddset(&mask, SIGALRM);
+
+    sigprocmask(SIG_BLOCK, &mask, NULL);
+
+    if ((sig_fd = signalfd(-1, &mask, 0)) < 0) {
+        LOG_ERRNO("failed to create signal FD");
+        exit(1);
+    }
+
+/**** handle directory of files */
+
+    if (dir == 1) {
+        int n = 0;
+        DIR *d;
+        struct dirent *dir;
+
+        d = opendir(dir_path);
+
+        /* Determine the number of files */
+        while((dir = readdir(d)) != NULL) {
+            /* look for *.jpg, *.png */
+            if ( !strcmp(dir->d_name, ".") || !strcmp(dir->d_name, "..") )
+            {
+                ;
+            } else {
+                n++;
+            }
+        }
+        rewinddir(d);
+
+        /* Put file names into the array */
+        while((dir = readdir(d)) != NULL) {
+            if ( !strcmp(dir->d_name, ".") || !strcmp(dir->d_name, "..") ) {
+                ;
+            } else {
+                files_img[image_cnt] = (char*) malloc (strlen(dir->d_name) + 1);
+                memcpy (files_img[image_cnt], dir->d_name, strlen(dir->d_name));
+                image_cnt++;
+            }
+        }
+        rewinddir(d);
+        qsort(files_img, n, sizeof(*files_img), a_strcmp);
+    }
+
+
+/* start loop IF dir instead of single file */
+    int image_index = 0;
+    char new_path[100];
+    while (1) {
+        image = NULL;
+
+        if (dir == 1) {
+            strcpy(new_path, dir_path);
+            if ((new_path[strlen(new_path) - 1]) != '/') 
+                strcat(new_path, "/");
+
+            if (random == 1) {
+                srand(time(0));
+                int rndm = rand() % image_cnt;
+                strcat(new_path, files_img[rndm]);
+            } else {
+                strcat(new_path, files_img[image_index]);
+                image_index++;
+                if (image_index >= image_cnt)
+                    image_index = 0;
+            }
+            image_path = new_path;
+        }
+
+        fp = fopen(image_path, "rb");
+        if (fp == NULL) {
+            LOG_ERRNO("%s: failed to open", image_path);
+            exit_code = EXIT_FAILURE;
+            display_close();
+	    exit_close();
+        }
+
+#if defined(WBG_HAVE_JPG)
+        if (image == NULL)
+            image = jpg_load(fp, image_path);
+#endif
+
+#if defined(WBG_HAVE_PNG)
+        if (image == NULL)
+            image = png_load(fp, image_path);
+#endif
+
+        if (image == NULL) {
+            if (dir == 1)
+                continue;
+            fprintf(stderr, "error: %s: failed to load\n", image_path);
+            fclose(fp);
+            exit_code = EXIT_FAILURE;
+            display_close();
+	    exit_close();
+        }
+        if (info)
+	    LOG_INFO("image -> %s\n", image_path);
+
+        if (display_init() != 0) {
+            display_close();
+	    exit_close();
+        }
+        int err_no = 0;
+
+        while (true) {
+            wl_display_flush(display);
+
+            struct pollfd fds[] = {
+                {.fd = wl_display_get_fd(display), .events = POLLIN},
+                {.fd = sig_fd, .events = POLLIN},
+            };
+            int ret = poll(fds, sizeof(fds) / sizeof(fds[0]), -1);
+
+            if (ret < 0) {
+                if (errno == EINTR)
+                    continue;
+
+                LOG_ERRNO("failed to poll");
+                err_no = 1;
+                break;
+            }
+
+            if (fds[0].revents & POLLHUP) {
+                LOG_WARN("disconnected by compositor");
+                err_no = 1;
+                break;
+            }
+
+            if (fds[0].revents & POLLIN)
+                wl_display_dispatch(display);
+
+            if (fds[1].revents & POLLHUP)
+                abort();
+
+            if (timer > 0) {
+                alarm(timer);
+            }
+
+            if (fds[1].revents & POLLIN) {
+                struct signalfd_siginfo info;
+                ssize_t count = read(sig_fd, &info, sizeof(info));
+                if (count < 0) {
+                    if (errno == EINTR)
+                        continue;
+
+                    LOG_ERRNO("failed to read from signal FD");
+                    err_no = 1;
+                    break;
+                }
+
+                assert(count == sizeof(info));
+                if (info.ssi_signo == SIGALRM) {
+                } else {
+                    err_no = 1;
+                    exit_code = 1;
+                }
+                break;
+            }
+        }
+
+        if ((err_no != 0) || (timer == 0))
+            break;
+    }
+/* end of while directory images */
+    display_close();
+    exit_close();
 }
