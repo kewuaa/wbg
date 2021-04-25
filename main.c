@@ -384,9 +384,6 @@ display_init() {
 static void 
 display_close() {
 
-    if (sig_fd >= 0)
-        close(sig_fd);
-
     tll_foreach(outputs, it)
         output_destroy(&it->item);
     tll_free(outputs);
@@ -451,7 +448,7 @@ main(int argc, char *argv[])
             timer = atoi(optarg);
             break;
           default:
-            fprintf(stderr, "Usage:\n%s [-t sec] [-r] <file/dir name>\n", argv[0]);
+            fprintf(stderr, "Usage:\n%s [-t sec] [-r] [-i] <file/dir name>\n", argv[0]);
             fprintf(stderr, "        -t timer seconds\n");
             fprintf(stderr, "        -r random yes (default no)\n");
             fprintf(stderr, "        -i info -- debugging\n");
@@ -459,7 +456,7 @@ main(int argc, char *argv[])
         }
 
     if (optind >= argc) {
-        fprintf(stderr, "Usage:\n%s [-t sec] [-r] <file/dir name>\n", argv[0]);
+        fprintf(stderr, "Usage:\n%s [-t sec] [-r] [-i] <file/dir name>\n", argv[0]);
         fprintf(stderr, "        -t timer seconds\n");
         fprintf(stderr, "        -r random yes (default no)\n");
         fprintf(stderr, "        -i info -- debugging\n");
@@ -558,7 +555,7 @@ main(int argc, char *argv[])
             LOG_ERRNO("%s: failed to open", image_path);
             exit_code = EXIT_FAILURE;
             display_close();
-	    exit_close();
+            exit_close();
         }
 
 #if defined(WBG_HAVE_JPG)
@@ -578,14 +575,14 @@ main(int argc, char *argv[])
             fclose(fp);
             exit_code = EXIT_FAILURE;
             display_close();
-	    exit_close();
+            exit_close();
         }
         if (info)
-	    LOG_INFO("image -> %s\n", image_path);
+            LOG_INFO("image -> %s\n", image_path);
 
         if (display_init() != 0) {
             display_close();
-	    exit_close();
+            exit_close();
         }
         int err_no = 0;
 
@@ -647,8 +644,11 @@ main(int argc, char *argv[])
 
         if ((err_no != 0) || (timer == 0))
             break;
+        display_close();
     }
 /* end of while directory images */
-    display_close();
+    if (sig_fd >= 0)
+        close(sig_fd);
+
     exit_close();
 }
