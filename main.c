@@ -14,6 +14,7 @@
 
 #include <sys/signalfd.h>
 #include <sys/stat.h>
+#include <sys/random.h>
 
 #include <wayland-client.h>
 #include <wayland-cursor.h>
@@ -40,10 +41,10 @@ static struct wl_registry *registry;
 static struct wl_compositor *compositor;
 static struct wl_shm *shm;
 static struct zwlr_layer_shell_v1 *layer_shell;
+
 int info = 0;
 int exit_code = EXIT_SUCCESS;
 int sig_fd = -1;
-FILE *fp;
 char *files_img[1024];
 
 static bool have_xrgb8888 = false;
@@ -408,7 +409,9 @@ static void
 exit_close() {
 
     log_deinit();
-    fclose(fp);
+
+    if (sig_fd >= 0)
+        close(sig_fd);
 
     exit(exit_code);
 }
@@ -433,6 +436,8 @@ main(int argc, char *argv[])
     int dir = 0;
     int timer = 0;
     int random = 0;
+
+    FILE *fp;
 
     opterr = 0;
     while ((c = getopt (argc, argv, "irt:")) != -1)
@@ -529,6 +534,7 @@ main(int argc, char *argv[])
 /* start loop IF dir instead of single file */
     int image_index = 0;
     char new_path[100];
+
     while (1) {
         image = NULL;
 
@@ -538,8 +544,10 @@ main(int argc, char *argv[])
                 strcat(new_path, "/");
 
             if (random == 1) {
-                srand(time(0));
-                int rndm = rand() % image_cnt;
+                unsigned int tmp;
+                getrandom(&tmp, sizeof(unsigned int), GRND_NONBLOCK);
+
+                int rndm = tmp % image_cnt;
                 strcat(new_path, files_img[rndm]);
             } else {
                 strcat(new_path, files_img[image_index]);
@@ -567,6 +575,7 @@ main(int argc, char *argv[])
         if (image == NULL)
             image = png_load(fp, image_path);
 #endif
+        fclose(fp);
 
         if (image == NULL) {
             if (dir == 1)
@@ -647,8 +656,6 @@ main(int argc, char *argv[])
         display_close();
     }
 /* end of while directory images */
-    if (sig_fd >= 0)
-        close(sig_fd);
 
     exit_close();
 }
