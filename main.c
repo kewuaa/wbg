@@ -545,7 +545,8 @@ main(int argc, char *argv[])
 
             if (random == 1) {
                 unsigned int tmp;
-                getrandom(&tmp, sizeof(unsigned int), GRND_NONBLOCK);
+                if (getrandom(&tmp, sizeof(unsigned int), GRND_NONBLOCK) < 0)
+                    continue;
 
                 int rndm = tmp % image_cnt;
                 strcat(new_path, files_img[rndm]);
