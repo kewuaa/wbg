@@ -507,7 +507,7 @@ main(int argc, char *argv[])
         /* Determine the number of files */
         while((dir = readdir(d)) != NULL) {
             /* look for *.jpg, *.png */
-            if ( !strcmp(dir->d_name, ".") || !strcmp(dir->d_name, "..") )
+            if ( !strcmp(dir->d_name, ".") || !strcmp(dir->d_name, "..") || dir->d_type == DT_DIR )
             {
                 ;
             } else {
@@ -518,7 +518,7 @@ main(int argc, char *argv[])
 
         /* Put file names into the array */
         while((dir = readdir(d)) != NULL) {
-            if ( !strcmp(dir->d_name, ".") || !strcmp(dir->d_name, "..") ) {
+            if ( !strcmp(dir->d_name, ".") || !strcmp(dir->d_name, "..") || dir->d_type == DT_DIR ) {
                 ;
             } else {
                 files_img[image_cnt] = (char*) malloc (strlen(dir->d_name) + 1);
@@ -529,7 +529,6 @@ main(int argc, char *argv[])
         rewinddir(d);
         qsort(files_img, n, sizeof(*files_img), a_strcmp);
     }
-
 
 /* start loop IF dir instead of single file */
     int image_index = 0;
