@@ -576,12 +576,15 @@ main(int argc, char *argv[])
             image = png_load(fp, image_path);
 #endif
         fclose(fp);
+        fp = NULL;
 
         if (image == NULL) {
             if (dir == 1)
                 continue;
             fprintf(stderr, "error: %s: failed to load\n", image_path);
-            fclose(fp);
+            if (fp != NULL) {
+                fclose(fp);
+            }
             exit_code = EXIT_FAILURE;
             display_close();
             exit_close();
